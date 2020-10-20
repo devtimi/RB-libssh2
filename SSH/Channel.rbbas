@@ -27,7 +27,7 @@ Implements SSHStream
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		 Shared Function CreateSCP(Session As SSH.Session, Path As String, Mode As Integer, Length As UInt32, ModTime As Integer, AccessTime As Integer) As SSH.Channel
+		Attributes( deprecated = "SSH.SCPStream.Constructor" )  Shared Function CreateSCP(Session As SSH.Session, Path As String, Mode As Integer, Length As UInt32, ModTime As Integer, AccessTime As Integer) As SSH.Channel
 		  ' Creates a new channel over the session for uploading over SCP. Perform the upload by writing to the returned
 		  ' Channel object. Make sure to call Channel.Close() when finished.
 		  ' Session is an existing SSH session. Path is the full remote path to save the upload to.
@@ -63,8 +63,10 @@ Implements SSHStream
 		Private Sub Destructor()
 		  If mChannel <> Nil Then
 		    Me.Close
-		    mLastError = libssh2_channel_free(mChannel)
-		    If mLastError <> 0 Then Raise New SSHException(mLastError)
+		    If mFreeable Then
+		      mLastError = libssh2_channel_free(mChannel)
+		      If mLastError <> 0 Then Raise New SSHException(mLastError)
+		    End If
 		  End If
 		  ChannelParent(Me.Session).UnregisterChannel(Me)
 		  mChannel = Nil
@@ -179,8 +181,8 @@ Implements SSHStream
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		 Shared Function OpenSCP(Session As SSH.Session, Path As String) As SSH.Channel
-		  ' Creates a new channel over the session for downloading over SCP. Perform the download by 
+		Attributes( deprecated = "SSH.SCPStream.Constructor" )  Shared Function OpenSCP(Session As SSH.Session, Path As String) As SSH.Channel
+		  ' Creates a new channel over the session for downloading over SCP. Perform the download by
 		  ' reading from the returned Channel object until Channel.EOF returns True.
 		  ' Session is an existing SSH session. Path is the full remote path of the file being downloaded.
 		  
@@ -351,16 +353,31 @@ Implements SSHStream
 	#tag Method, Flags = &h0
 		Sub Write(text As String, StreamID As Integer)
 		  ' Writes the text to the specified StreamID.
+		  ' Waits for the sent data to be ack'd before sending the rest
 		  
-		  Dim buffer As New BinaryStream(text)
-		  Do Until buffer.EOF
-		    Dim packet As MemoryBlock = buffer.Read(WriteWindow)
-		    If packet = Nil Or packet.Size = 0 Then Exit Do
-		    Do
-		      mLastError = libssh2_channel_write_ex(mChannel, StreamID, packet, packet.Size)
-		    Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+		  Dim buffer As MemoryBlock = text
+		  Dim size As Integer = buffer.Size
+		  Do
+		    mLastError = libssh2_channel_write_ex(mChannel, StreamID, buffer, size)
+		    Select Case mLastError
+		    Case 0, LIBSSH2_ERROR_EAGAIN ' nothing ack'd yet
+		      Continue
+		      
+		    Case Is > 0 ' the amount ack'd
+		      If mLastError = size Then
+		        Exit Do ' done
+		      Else
+		        ' update the size and call libssh2_channel_write_ex() again
+		        size = size - mLastError
+		        Continue
+		      End If
+		      
+		    Case Is < 0 ' error
+		      Exit Do
+		    End Select
 		  Loop
 		  If mLastError < 0 Then Raise New SSHException(mLastError)
+		  mLastError = 0
 		End Sub
 	#tag EndMethod
 
@@ -400,8 +417,28 @@ Implements SSHStream
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
-			  ' Returns the exit code of the process running on the server. Note that the exit status may 
-			  ' not be available if the remote end has not yet set its status to closed. Call Close() to 
+			  Return mDataMode
+			End Get
+		#tag EndGetter
+		#tag Setter
+			Set
+			  If mChannel = Nil Then Return
+			  
+			  Do
+			    mLastError = libssh2_channel_handle_extended_data2(mChannel, CType(value, Integer))
+			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+			  
+			  If mLastError < 0 Then Raise New SSHException(mLastError)
+			End Set
+		#tag EndSetter
+		DataMode As SSH.Channel.ExtendedDataMode
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' Returns the exit code of the process running on the server. Note that the exit status may
+			  ' not be available if the remote end has not yet set its status to closed. Call Close() to
 			  ' set the local status to closed, and then WaitClose() to wait for the server to change its
 			  ' status too.
 			  
@@ -413,6 +450,14 @@ Implements SSHStream
 
 	#tag Property, Flags = &h21
 		Private mChannel As Ptr
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mDataMode As ExtendedDataMode
+	#tag EndProperty
+
+	#tag Property, Flags = &h1
+		Protected mFreeable As Boolean = True
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -465,6 +510,13 @@ Implements SSHStream
 		#tag EndGetter
 		WriteWindow As UInt32
 	#tag EndComputedProperty
+
+
+	#tag Enum, Name = ExtendedDataMode, Type = Integer, Flags = &h0
+		Normal
+		  Ignore
+		Merge
+	#tag EndEnum
 
 
 	#tag ViewBehavior
