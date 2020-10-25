@@ -269,6 +269,8 @@ Protected Module SSH
 		    Return "ERR_USERNAME_REQUIRED"
 		  Case ERR_TIMEOUT_ELAPSED
 		    Return "ERR_TIMEOUT_ELAPSED"
+		  Case ERR_NOT_AUTHENTICATED
+		    Return "ERR_NOT_AUTHENTICATED"
 		  Else
 		    Return "Unknown error number."
 		    
@@ -510,7 +512,7 @@ Protected Module SSH
 	#tag EndExternalMethod
 
 	#tag ExternalMethod, Flags = &h21
-		Private Soft Declare Function libssh2_poll Lib libssh2 (Descriptors As Ptr, NumDescriptors As UInt32, TimeOut As Integer) As Integer
+		Private Soft Declare Function libssh2_poll Lib libssh2 (ByRef Descriptor As LIBSSH2_POLLFD, NumDescriptors As UInt32, TimeOut As Integer) As Integer
 	#tag EndExternalMethod
 
 	#tag ExternalMethod, Flags = &h21
@@ -814,22 +816,6 @@ Protected Module SSH
 		End Function
 	#tag EndMethod
 
-	#tag Method, Flags = &h0
-		Function Poll(Extends Stream As SSH.SSHStream, Timeout As Integer = 1000) As Boolean
-		  Dim descriptor As Ptr
-		  Select Case Stream
-		  Case IsA Channel
-		    descriptor = Channel(Stream).Handle
-		  Case IsA SFTPStream
-		    descriptor = SFTPStream(Stream).Handle
-		  Else
-		    Raise New RuntimeException
-		  End Select
-		  Dim i As Integer = libssh2_poll(descriptor, 1, Timeout)
-		  Return i > 0
-		End Function
-	#tag EndMethod
-
 	#tag Method, Flags = &h1
 		Protected Function Put(Optional Session As SSH.Session, URL As String, Length As UInt32 = 0, Overwrite As Boolean = False) As SSH.SSHStream
 		  ' Prepares a file upload over SCP or SFTP. Returns a SSHStream that you
@@ -860,50 +846,52 @@ Protected Module SSH
 
 	#tag Method, Flags = &h1
 		Protected Function SFTPErrorName(SFTPStatusCode As Int32) As String
-		  Select Case SFTPStatusCode 
-		  Case SFTPStream.LIBSSH2_FX_BAD_MESSAGE
+		  ' Returns the name for the code returned from SFTPSession.LastStatusCode
+		  
+		  Select Case SFTPStatusCode
+		  Case LIBSSH2_FX_BAD_MESSAGE
 		    Return "LIBSSH2_FX_BAD_MESSAGE"
-		  Case SFTPStream.LIBSSH2_FX_CONNECTION_LOST
+		  Case LIBSSH2_FX_CONNECTION_LOST
 		    Return "LIBSSH2_FX_CONNECTION_LOST"
-		  Case SFTPStream.LIBSSH2_FX_DIR_NOT_EMPTY
+		  Case LIBSSH2_FX_DIR_NOT_EMPTY
 		    Return "LIBSSH2_FX_DIR_NOT_EMPTY"
-		  Case SFTPStream.LIBSSH2_FX_EOF
+		  Case LIBSSH2_FX_EOF
 		    Return "LIBSSH2_FX_EOF"
-		  Case SFTPStream.LIBSSH2_FX_FAILURE
+		  Case LIBSSH2_FX_FAILURE
 		    Return "LIBSSH2_FX_FAILURE"
-		  Case SFTPStream.LIBSSH2_FX_FILE_ALREADY_EXISTS
+		  Case LIBSSH2_FX_FILE_ALREADY_EXISTS
 		    Return "LIBSSH2_FX_FILE_ALREADY_EXISTS"
-		  Case SFTPStream.LIBSSH2_FX_INVALID_FILENAME
+		  Case LIBSSH2_FX_INVALID_FILENAME
 		    Return "LIBSSH2_FX_INVALID_FILENAME"
-		  Case SFTPStream.LIBSSH2_FX_INVALID_HANDLE
+		  Case LIBSSH2_FX_INVALID_HANDLE
 		    Return "LIBSSH2_FX_INVALID_HANDLE"
-		  Case SFTPStream.LIBSSH2_FX_LINK_LOOP
+		  Case LIBSSH2_FX_LINK_LOOP
 		    Return "LIBSSH2_FX_LINK_LOOP"
-		  Case SFTPStream.LIBSSH2_FX_LOCK_CONFLICT
+		  Case LIBSSH2_FX_LOCK_CONFLICT
 		    Return "LIBSSH2_FX_LOCK_CONFLICT"
-		  Case SFTPStream.LIBSSH2_FX_NOT_A_DIRECTORY
+		  Case LIBSSH2_FX_NOT_A_DIRECTORY
 		    Return "LIBSSH2_FX_NOT_A_DIRECTORY"
-		  Case SFTPStream.LIBSSH2_FX_NO_CONNECTION
+		  Case LIBSSH2_FX_NO_CONNECTION
 		    Return "LIBSSH2_FX_NO_CONNECTION"
-		  Case SFTPStream.LIBSSH2_FX_NO_MEDIA
+		  Case LIBSSH2_FX_NO_MEDIA
 		    Return "LIBSSH2_FX_NO_MEDIA"
-		  Case SFTPStream.LIBSSH2_FX_NO_SPACE_ON_FILESYSTEM
+		  Case LIBSSH2_FX_NO_SPACE_ON_FILESYSTEM
 		    Return "LIBSSH2_FX_NO_SPACE_ON_FILESYSTEM"
-		  Case SFTPStream.LIBSSH2_FX_NO_SUCH_FILE
+		  Case LIBSSH2_FX_NO_SUCH_FILE
 		    Return "LIBSSH2_FX_NO_SUCH_FILE"
-		  Case SFTPStream.LIBSSH2_FX_NO_SUCH_PATH
+		  Case LIBSSH2_FX_NO_SUCH_PATH
 		    Return "LIBSSH2_FX_NO_SUCH_PATH"
-		  Case SFTPStream.LIBSSH2_FX_OK
+		  Case LIBSSH2_FX_OK
 		    Return "LIBSSH2_FX_OK"
-		  Case SFTPStream.LIBSSH2_FX_OP_UNSUPPORTED
+		  Case LIBSSH2_FX_OP_UNSUPPORTED
 		    Return "LIBSSH2_FX_OP_UNSUPPORTED"
-		  Case SFTPStream.LIBSSH2_FX_PERMISSION_DENIED
+		  Case LIBSSH2_FX_PERMISSION_DENIED
 		    Return "LIBSSH2_FX_PERMISSION_DENIED"
-		  Case SFTPStream.LIBSSH2_FX_QUOTA_EXCEEDED
+		  Case LIBSSH2_FX_QUOTA_EXCEEDED
 		    Return "LIBSSH2_FX_QUOTA_EXCEEDED"
-		  Case SFTPStream.LIBSSH2_FX_UNKNOWN_PRINCIPAL
+		  Case LIBSSH2_FX_UNKNOWN_PRINCIPAL
 		    Return "LIBSSH2_FX_UNKNOWN_PRINCIPAL"
-		  Case SFTPStream.LIBSSH2_FX_WRITE_PROTECT
+		  Case LIBSSH2_FX_WRITE_PROTECT
 		    Return "LIBSSH2_FX_WRITE_PROTECT"
 		  Else
 		    Return "Unknown SFTP error code: " + Str(SFTPStatusCode)
@@ -964,6 +952,9 @@ Protected Module SSH
 	#tag EndConstant
 
 	#tag Constant, Name = ERR_LENGTH_REQUIRED, Type = Double, Dynamic = False, Default = \"-505", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = ERR_NOT_AUTHENTICATED, Type = Double, Dynamic = False, Default = \"-510", Scope = Protected
 	#tag EndConstant
 
 	#tag Constant, Name = ERR_PORT_IN_USE, Type = Double, Dynamic = False, Default = \"-105", Scope = Protected
@@ -1149,6 +1140,90 @@ Protected Module SSH
 	#tag Constant, Name = LIBSSH2_ERROR_ZLIB, Type = Double, Dynamic = False, Default = \"-29", Scope = Protected
 	#tag EndConstant
 
+	#tag Constant, Name = LIBSSH2_FXF_APPEND, Type = Double, Dynamic = False, Default = \"&h00000004", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FXF_CREAT, Type = Double, Dynamic = False, Default = \"&h00000008", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FXF_EXCL, Type = Double, Dynamic = False, Default = \"&h00000020", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FXF_READ, Type = Double, Dynamic = False, Default = \"&h00000001", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FXF_TRUNC, Type = Double, Dynamic = False, Default = \"&h00000010", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FXF_WRITE, Type = Double, Dynamic = False, Default = \"&h00000002", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_BAD_MESSAGE, Type = Double, Dynamic = False, Default = \"5", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_CONNECTION_LOST, Type = Double, Dynamic = False, Default = \"7", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_DIR_NOT_EMPTY, Type = Double, Dynamic = False, Default = \"18", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_EOF, Type = Double, Dynamic = False, Default = \"1", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_FAILURE, Type = Double, Dynamic = False, Default = \"4", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_FILE_ALREADY_EXISTS, Type = Double, Dynamic = False, Default = \"11", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_INVALID_FILENAME, Type = Double, Dynamic = False, Default = \"20", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_INVALID_HANDLE, Type = Double, Dynamic = False, Default = \"9", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_LINK_LOOP, Type = Double, Dynamic = False, Default = \"21", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_LOCK_CONFLICT, Type = Double, Dynamic = False, Default = \"17", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_NOT_A_DIRECTORY, Type = Double, Dynamic = False, Default = \"19", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_NO_CONNECTION, Type = Double, Dynamic = False, Default = \"6", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_NO_MEDIA, Type = Double, Dynamic = False, Default = \"13", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_NO_SPACE_ON_FILESYSTEM, Type = Double, Dynamic = False, Default = \"14", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_NO_SUCH_FILE, Type = Double, Dynamic = False, Default = \"2", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_NO_SUCH_PATH, Type = Double, Dynamic = False, Default = \"10", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_OK, Type = Double, Dynamic = False, Default = \"0", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_OP_UNSUPPORTED, Type = Double, Dynamic = False, Default = \"8", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_PERMISSION_DENIED, Type = Double, Dynamic = False, Default = \"3", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_QUOTA_EXCEEDED, Type = Double, Dynamic = False, Default = \"15", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_UNKNOWN_PRINCIPAL, Type = Double, Dynamic = False, Default = \"16", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_FX_WRITE_PROTECT, Type = Double, Dynamic = False, Default = \"12", Scope = Protected
+	#tag EndConstant
+
 	#tag Constant, Name = LIBSSH2_HOSTKEY_TYPE_DSS, Type = Double, Dynamic = False, Default = \"2", Scope = Private
 	#tag EndConstant
 
@@ -1170,10 +1245,67 @@ Protected Module SSH
 	#tag Constant, Name = LIBSSH2_KNOWNHOST_CHECK_NOTFOUND, Type = Double, Dynamic = False, Default = \"2", Scope = Private
 	#tag EndConstant
 
+	#tag Constant, Name = LIBSSH2_POLLFD_CHANNEL, Type = Double, Dynamic = False, Default = \"2", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_CHANNEL_CLOSED, Type = Double, Dynamic = False, Default = \"&h0080", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_LISTENER, Type = Double, Dynamic = False, Default = \"3", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_LISTENER_CLOSED, Type = Double, Dynamic = False, Default = \"&h0080", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLERR, Type = Double, Dynamic = False, Default = \"&h0008", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLEX, Type = Double, Dynamic = False, Default = \"&h0040", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLEXT, Type = Double, Dynamic = False, Default = \"&h0002", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLHUP, Type = Double, Dynamic = False, Default = \"&h0010", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLIN, Type = Double, Dynamic = False, Default = \"&h0001", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLNVAL, Type = Double, Dynamic = False, Default = \"&h0020", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLOUT, Type = Double, Dynamic = False, Default = \"&h0004", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_POLLPRI, Type = Double, Dynamic = False, Default = \"&h0002", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_SESSION_CLOSED, Type = Double, Dynamic = False, Default = \"&h0010", Scope = Protected
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_POLLFD_SOCKET, Type = Double, Dynamic = False, Default = \"1", Scope = Private
+	#tag EndConstant
+
 	#tag Constant, Name = LIBSSH2_SESSION_BLOCK_INBOUND, Type = Double, Dynamic = False, Default = \"&h0001", Scope = Private
 	#tag EndConstant
 
 	#tag Constant, Name = LIBSSH2_SESSION_BLOCK_OUTBOUND, Type = Double, Dynamic = False, Default = \"&h0002", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_SFTP_ATTR_ACMODTIME, Type = Double, Dynamic = False, Default = \"8", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_SFTP_ATTR_EXTENDED, Type = Double, Dynamic = False, Default = \"&h80000000", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_SFTP_ATTR_PERMISSIONS, Type = Double, Dynamic = False, Default = \"4", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_SFTP_ATTR_SIZE, Type = Double, Dynamic = False, Default = \"1", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = LIBSSH2_SFTP_ATTR_UIDGID, Type = Double, Dynamic = False, Default = \"2", Scope = Private
 	#tag EndConstant
 
 	#tag Constant, Name = MIMIMUM_VERSION, Type = Double, Dynamic = False, Default = \"&h00010700", Scope = Private
@@ -1197,6 +1329,13 @@ Protected Module SSH
 		  Name As Ptr
 		  Key As Ptr
 		TypeMask As Integer
+	#tag EndStructure
+
+	#tag Structure, Name = LIBSSH2_POLLFD, Flags = &h21, Attributes = \"StructureAlignment \x3D 8"
+		Type As UInt8
+		  Descriptor As Ptr
+		  Events As UInt32
+		REvents As UInt32
 	#tag EndStructure
 
 	#tag Structure, Name = LIBSSH2_SFTP_ATTRIBUTES, Flags = &h21, Attributes = \"StructureAlignment \x3D 8"

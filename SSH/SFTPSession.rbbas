@@ -2,9 +2,14 @@
 Protected Class SFTPSession
 	#tag Method, Flags = &h0
 		Sub Constructor(Session As SSH.Session)
+		  If Not Session.IsAuthenticated Then 
+		    mLastError = ERR_NOT_AUTHENTICATED
+		    Raise New SSHException(Me)
+		  End If
+		  
 		  mInit = SSHInit.GetInstance()
 		  mSFTP = libssh2_sftp_init(Session.Handle)
-		  If mSFTP = Nil Then Raise New SSHException(Session.GetLastError)
+		  If mSFTP = Nil Then Raise New SSHException(Session)
 		  mSession = Session
 		End Sub
 	#tag EndMethod
@@ -29,6 +34,10 @@ Protected Class SFTPSession
 	#tag Method, Flags = &h0
 		Function Get(FileName As String) As SSH.SFTPStream
 		  Return CreateStream(FileName, LIBSSH2_FXF_READ, 0, False)
+		  
+		Exception err As SSHException
+		  mLastError = err.ErrorNumber
+		  If mLastError = 0 Then mLastError = LastStatusCode()
 		End Function
 	#tag EndMethod
 
@@ -47,12 +56,6 @@ Protected Class SFTPSession
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function GetLastError() As Int32
-		  Return mSession.GetLastError()
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
 		Function Handle() As Ptr
 		  Return mSFTP
 		End Function
@@ -66,14 +69,17 @@ Protected Class SFTPSession
 
 	#tag Method, Flags = &h0
 		Function LastStatusCode() As Integer
+		  ' Returns the last SFTP status code, which will be one of the LIBSSH2_FX_* constants.
+		  ' Check this value if SFTPStream.LastError or SFTPDirectory.LastError = LIBSSH2_ERROR_SFTP_PROTOCOL(-31)
+		  
 		  If mSFTP = Nil Then Return 0
 		  Return libssh2_sftp_last_error(mSFTP)
 		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function ListDirectory(DirectoryName As String) As SSH.SFTPStream
-		  Return CreateStream(DirectoryName, 0, 0, True)
+		Function ListDirectory(DirectoryName As String) As SSH.SFTPDirectory
+		  Return New SFTPDirectory(Me, DirectoryName)
 		End Function
 	#tag EndMethod
 
@@ -83,7 +89,7 @@ Protected Class SFTPSession
 		  Do
 		    mLastError = libssh2_sftp_mkdir_ex(mSFTP, dn, dn.Size, Mode)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
@@ -116,7 +122,7 @@ Protected Class SFTPSession
 		  Do
 		    mLastError = libssh2_sftp_rmdir_ex(mSFTP, dn, dn.Size)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
@@ -126,7 +132,7 @@ Protected Class SFTPSession
 		  Do
 		    mLastError = libssh2_sftp_unlink_ex(mSFTP, fn, fn.Size)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
@@ -139,7 +145,7 @@ Protected Class SFTPSession
 		  Do
 		    mLastError = libssh2_sftp_rename_ex(mSFTP, sn, sn.Size, dn, dn.Size, flag)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
@@ -186,24 +192,6 @@ Protected Class SFTPSession
 		Session As SSH.Session
 	#tag EndComputedProperty
 
-
-	#tag Constant, Name = LIBSSH2_FXF_APPEND, Type = Double, Dynamic = False, Default = \"&h00000004", Scope = Public
-	#tag EndConstant
-
-	#tag Constant, Name = LIBSSH2_FXF_CREAT, Type = Double, Dynamic = False, Default = \"&h00000008", Scope = Public
-	#tag EndConstant
-
-	#tag Constant, Name = LIBSSH2_FXF_EXCL, Type = Double, Dynamic = False, Default = \"&h00000020", Scope = Public
-	#tag EndConstant
-
-	#tag Constant, Name = LIBSSH2_FXF_READ, Type = Double, Dynamic = False, Default = \"&h00000001", Scope = Public
-	#tag EndConstant
-
-	#tag Constant, Name = LIBSSH2_FXF_TRUNC, Type = Double, Dynamic = False, Default = \"&h00000010", Scope = Public
-	#tag EndConstant
-
-	#tag Constant, Name = LIBSSH2_FXF_WRITE, Type = Double, Dynamic = False, Default = \"&h00000002", Scope = Public
-	#tag EndConstant
 
 	#tag Constant, Name = LIBSSH2_SFTP_RENAME_ATOMIC, Type = Double, Dynamic = False, Default = \"&h00000002", Scope = Public
 	#tag EndConstant

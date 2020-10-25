@@ -33,13 +33,14 @@ Implements ChannelParent
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub Close(Description As String = "The session has ended.", Reason As SSH.DisconnectReason = SSH.DisconnectReason.AppRequested)
+		Sub Close(Description As String = "The session has ended.", Reason As SSH.DisconnectReason = SSH.DisconnectReason.AppRequested, Language As String = "")
 		  ' Ends the SSH session and closes the socket.
 		  
 		  If mSession <> Nil Then
 		    Do
-		      mLastError = libssh2_session_disconnect_ex(mSession, Reason, Description, "")
+		      mLastError = libssh2_session_disconnect_ex(mSession, Reason, Description, Language)
 		    Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+		    RaiseEvent Disconnected(Reason, Description, Language)
 		  End If
 		  If mSocket <> Nil Then mSocket.Close()
 		End Sub
@@ -146,7 +147,7 @@ Implements ChannelParent
 		  If mSession <> Nil Then
 		    mLastError = libssh2_session_free(mSession)
 		    mSession = Nil
-		    If mLastError <> 0 Then Raise New SSHException(mLastError)
+		    If mLastError <> 0 Then Raise New SSHException(Me)
 		  End If
 		  mChannels = Nil
 		  mSocket = Nil
@@ -286,7 +287,7 @@ Implements ChannelParent
 		  Do
 		    mLastError = libssh2_session_handshake(mSession, mSocket.Handle)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		  
 		End Sub
 	#tag EndMethod
@@ -334,9 +335,25 @@ Implements ChannelParent
 	#tag EndDelegateDeclaration
 
 	#tag Method, Flags = &h0
-		Sub Poll()
-		  If mSocket <> Nil Then mSocket.Poll()
-		End Sub
+		Function Poll(Timeout As Integer = 1000, EventMask As Integer = 0) As Boolean
+		  If Not IsConnected Then Return False
+		  If EventMask = 0 Then EventMask = LIBSSH2_POLLFD_POLLIN Or LIBSSH2_POLLFD_POLLOUT
+		  Dim pollfd As LIBSSH2_POLLFD
+		  pollfd.Type = LIBSSH2_POLLFD_SOCKET
+		  pollfd.Descriptor = Ptr(mSocket.Handle)
+		  pollfd.Events = EventMask
+		  If libssh2_poll(pollfd, 1, Timeout) <> 1 Then
+		    mLastError = 0
+		    Return False
+		  End If
+		  mLastError = pollfd.REvents
+		  Select Case True
+		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLIN) = LIBSSH2_POLLFD_POLLIN, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLOUT) = LIBSSH2_POLLFD_POLLOUT, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLEXT) = LIBSSH2_POLLFD_POLLEXT
+		    Return True
+		  End Select
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
@@ -517,15 +534,15 @@ Implements ChannelParent
 
 	#tag Method, Flags = &h0
 		Sub SetFlag(Flag As Integer, Value As Integer)
-		  Dim err As Integer = libssh2_session_flag(mSession, Flag, Value)
-		  If err <> 0 Then Raise New SSHException(err)
+		  mLastError = libssh2_session_flag(mSession, Flag, Value)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
 		Sub SetLocalBanner(BannerText As String)
-		  Dim err As Integer = libssh2_session_banner_set(mSession, BannerText)
-		  If err <> 0 Then Raise New SSHException(err)
+		  mLastError = libssh2_session_banner_set(mSession, BannerText)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 

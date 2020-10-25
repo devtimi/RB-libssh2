@@ -18,6 +18,11 @@ Implements SSHStream
 
 	#tag Method, Flags = &h1
 		Protected Sub Constructor(Session As SSH.Session, ChannelPtr As Ptr)
+		  If Not Session.IsAuthenticated Then
+		    mLastError = ERR_NOT_AUTHENTICATED
+		    Raise New SSHException(Me)
+		  End If
+		  
 		  mInit = SSHInit.GetInstance()
 		  mChannel = ChannelPtr
 		  mSession = Session
@@ -65,10 +70,10 @@ Implements SSHStream
 		    Me.Close
 		    If mFreeable Then
 		      mLastError = libssh2_channel_free(mChannel)
-		      If mLastError <> 0 Then Raise New SSHException(mLastError)
+		      If mLastError <> 0 Then Raise New SSHException(Me)
 		    End If
 		  End If
-		  ChannelParent(Me.Session).UnregisterChannel(Me)
+		  If mSession <> Nil Then ChannelParent(Me.Session).UnregisterChannel(Me)
 		  mChannel = Nil
 		End Sub
 	#tag EndMethod
@@ -85,7 +90,7 @@ Implements SSHStream
 		  // Part of the Readable interface.
 		  ' Returns True if the server has indicated that no further data will be sent over the channel.
 		  
-		  Do
+		  Do Until Not mOpen
 		    mLastError = libssh2_channel_eof(mChannel)
 		    Select Case mLastError
 		    Case Is >= 0
@@ -95,9 +100,11 @@ Implements SSHStream
 		      Continue
 		      
 		    Else
-		      Raise New SSHException(mLastError)
+		      Raise New SSHException(Me)
 		    End Select
 		  Loop
+		  
+		  Return Not mOpen
 		End Function
 	#tag EndMethod
 
@@ -109,7 +116,7 @@ Implements SSHStream
 		  Do
 		    mLastError = libssh2_channel_send_eof(mChannel)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
@@ -133,7 +140,7 @@ Implements SSHStream
 		  Do
 		    mLastError = libssh2_channel_flush_ex(mChannel, StreamID)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		  
 		End Sub
 	#tag EndMethod
@@ -151,7 +158,7 @@ Implements SSHStream
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		 Shared Function Open(Session As SSH.Session) As SSH.Channel
+		Attributes( deprecated = "SSH.OpenChannel" )  Shared Function Open(Session As SSH.Session) As SSH.Channel
 		  ' Creates a new channel over the Session of type "session". This is the most commonly used channel type.
 		  
 		  Return Open(Session, "session", LIBSSH2_CHANNEL_WINDOW_DEFAULT, LIBSSH2_CHANNEL_PACKET_DEFAULT, "")
@@ -199,10 +206,88 @@ Implements SSHStream
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function Poll() As Boolean
-		  ' Returns True if data is available in the channel's read buffer.
+		Function Poll(Timeout As Integer = 1000) As Boolean
+		  ' ' Returns True if data is available in the channel's read buffer.
+		  ' 
+		  ' If mChannel <> Nil Then Return (libssh2_poll_channel_read(mChannel, 0) <> 0)
 		  
-		  If mChannel <> Nil Then Return (libssh2_poll_channel_read(mChannel, 0) <> 0)
+		  Return PollReadable(Timeout) Or PollReadable(Timeout, True) Or PollWriteable()
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h1
+		Protected Function PollEvents(Timeout As Integer, EventMask As Integer) As Integer
+		  If Not mOpen Then Return 0
+		  Dim pollfd As LIBSSH2_POLLFD
+		  pollfd.Type = LIBSSH2_POLLFD_CHANNEL
+		  pollfd.Descriptor = Me.Handle
+		  pollfd.Events = EventMask
+		  If libssh2_poll(pollfd, 1, Timeout) <> 1 Then Return 0
+		  Return pollfd.REvents
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function PollReadable(Timeout As Integer = 1000, PollStdErr As Boolean = False) As Boolean
+		  If Not mOpen Then Return False
+		  If Not PollStdErr Then
+		    mLastError = LIBSSH2_POLLFD_POLLIN
+		  Else
+		    mLastError = LIBSSH2_POLLFD_POLLEXT
+		  End If
+		  mLastError = PollEvents(Timeout, mLastError)
+		  If mLastError = 0 Then Return False
+		  Select Case True
+		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLIN) = LIBSSH2_POLLFD_POLLIN, BitAnd(mLastError, LIBSSH2_POLLFD_POLLEXT) = LIBSSH2_POLLFD_POLLEXT
+		    mLastError = 0
+		    RaiseEvent DataAvailable(PollStdErr)
+		    Return True
+		    
+		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLERR) = LIBSSH2_POLLFD_POLLERR, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLHUP) = LIBSSH2_POLLFD_POLLHUP, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_SESSION_CLOSED) = LIBSSH2_POLLFD_SESSION_CLOSED, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLNVAL) = LIBSSH2_POLLFD_POLLNVAL, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLEX) = LIBSSH2_POLLFD_POLLEX
+		    RaiseEvent Error(mLastError)
+		    mOpen = False
+		    
+		  Case BitAnd(mLastError, LIBSSH2_POLLFD_CHANNEL_CLOSED) = LIBSSH2_POLLFD_CHANNEL_CLOSED, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_LISTENER_CLOSED) = LIBSSH2_POLLFD_LISTENER_CLOSED
+		    ' disconnected but there may be data available in the buffer still
+		    mLastError = Session.LastError()
+		    RaiseEvent Disconnected()
+		    mOpen = False
+		  End Select
+		  
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function PollWriteable(Timeout As Integer = 1000) As Boolean
+		  System.DebugLog(CurrentMethodName + "(" + Str(Timeout) + ")")
+		  If Not mOpen Then Return False
+		  mLastError = LIBSSH2_POLLFD_POLLOUT
+		  mLastError = PollEvents(Timeout, mLastError)
+		  
+		  Select Case True
+		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLOUT) = LIBSSH2_POLLFD_POLLOUT
+		    mLastError = 0
+		    Return True
+		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLERR) = LIBSSH2_POLLFD_POLLERR, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLHUP) = LIBSSH2_POLLFD_POLLHUP, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_SESSION_CLOSED) = LIBSSH2_POLLFD_SESSION_CLOSED, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLNVAL) = LIBSSH2_POLLFD_POLLNVAL, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLEX) = LIBSSH2_POLLFD_POLLEX
+		    RaiseEvent Error(mLastError)
+		    mOpen = False
+		    
+		  Case BitAnd(mLastError, LIBSSH2_POLLFD_CHANNEL_CLOSED) = LIBSSH2_POLLFD_CHANNEL_CLOSED, _
+		    BitAnd(mLastError, LIBSSH2_POLLFD_LISTENER_CLOSED) = LIBSSH2_POLLFD_LISTENER_CLOSED
+		    mLastError = Session.LastError()
+		    RaiseEvent Disconnected()
+		    mOpen = False
+		  End Select
+		  
 		End Function
 	#tag EndMethod
 
@@ -232,7 +317,7 @@ Implements SSHStream
 		  Do
 		    mLastError = libssh2_channel_read_ex(mChannel, StreamID, buffer, buffer.Size)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError < 0 Then Raise New SSHException(mLastError)
+		  If mLastError < 0 Then Raise New SSHException(Me)
 		  If mLastError <> buffer.Size Then buffer.Size = mLastError
 		  Return DefineEncoding(buffer, encoding)
 		End Function
@@ -280,7 +365,7 @@ Implements SSHStream
 		      mLastError = libssh2_channel_request_pty_ex(mChannel, Terminal, Terminal.Len, Nil, 0, cw, ch, pw, ph)
 		    End If
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
@@ -292,29 +377,8 @@ Implements SSHStream
 		  Do
 		    mLastError = libssh2_channel_setenv_ex(mChannel, Name, Name.Len, Value, Value.Len)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function TryRead(Count As Integer, StreamID As Integer, encoding As TextEncoding = Nil) As String
-		  ' EXPERIMENTAL. Attempt to read from the channel without blocking.
-		  
-		  Dim buffer As New MemoryBlock(Count)
-		  Do
-		    mLastError = libssh2_channel_read_ex(mChannel, StreamID, buffer, buffer.Size)
-		  Loop Until mLastError <> 0
-		  Select Case mLastError
-		  Case LIBSSH2_ERROR_EAGAIN
-		    Return ""
-		  Case Is < 0
-		    Raise New SSHException(mLastError)
-		  Else
-		    If mLastError <> buffer.Size Then buffer.Size = mLastError
-		    mLastError = 0
-		    Return DefineEncoding(buffer, encoding)
-		  End Select
-		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -326,7 +390,7 @@ Implements SSHStream
 		  Do
 		    mLastError = libssh2_channel_wait_closed(mChannel)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  If mLastError <> 0 Then Raise New SSHException(mLastError)
+		  If mLastError <> 0 Then Raise New SSHException(Me)
 		End Sub
 	#tag EndMethod
 
@@ -376,7 +440,7 @@ Implements SSHStream
 		      Exit Do
 		    End Select
 		  Loop
-		  If mLastError < 0 Then Raise New SSHException(mLastError)
+		  If mLastError < 0 Then Raise New SSHException(Me)
 		  mLastError = 0
 		End Sub
 	#tag EndMethod
@@ -387,6 +451,19 @@ Implements SSHStream
 		  Return False
 		End Function
 	#tag EndMethod
+
+
+	#tag Hook, Flags = &h0
+		Event DataAvailable(ExtendedStream As Boolean)
+	#tag EndHook
+
+	#tag Hook, Flags = &h0
+		Event Disconnected()
+	#tag EndHook
+
+	#tag Hook, Flags = &h0
+		Event Error(Reasons As Integer)
+	#tag EndHook
 
 
 	#tag ComputedProperty, Flags = &h0
@@ -428,7 +505,7 @@ Implements SSHStream
 			    mLastError = libssh2_channel_handle_extended_data2(mChannel, CType(value, Integer))
 			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
 			  
-			  If mLastError < 0 Then Raise New SSHException(mLastError)
+			  If mLastError < 0 Then Raise New SSHException(Me)
 			End Set
 		#tag EndSetter
 		DataMode As SSH.Channel.ExtendedDataMode
@@ -448,6 +525,15 @@ Implements SSHStream
 		ExitStatus As Integer
 	#tag EndComputedProperty
 
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  return mOpen
+			End Get
+		#tag EndGetter
+		IsOpen As Boolean
+	#tag EndComputedProperty
+
 	#tag Property, Flags = &h21
 		Private mChannel As Ptr
 	#tag EndProperty
@@ -464,8 +550,8 @@ Implements SSHStream
 		Private mInit As SSHInit
 	#tag EndProperty
 
-	#tag Property, Flags = &h21
-		Private mLastError As Int32
+	#tag Property, Flags = &h1
+		Protected mLastError As Int32
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
