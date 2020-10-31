@@ -4,7 +4,7 @@ Implements SSHStream
 	#tag Method, Flags = &h0
 		Sub Close()
 		  // Part of the SSHStream interface.
-		  ' Sends the SSH close message to the server. 
+		  ' Sends the SSH2 channel close message to the server.
 		  
 		  If mChannel = Nil Or Not mOpen Then Return
 		  
@@ -18,22 +18,18 @@ Implements SSHStream
 
 	#tag Method, Flags = &h1
 		Protected Sub Constructor(Session As SSH.Session, ChannelPtr As Ptr)
-		  mSession = Session
-		  If Not mSession.IsAuthenticated Then
-		    mLastError = ERR_NOT_AUTHENTICATED
-		    Raise New SSHException(Me)
-		  End If
+		  ' Take ownership of an already initialized libssh2 channel reference.
+		  ' ChannelPtr must refer to a valid channel opened over the specified Session.
 		  
-		  mInit = SSHInit.GetInstance()
-		  mChannel = ChannelPtr
 		  mSession = Session
-		  mOpen = True
+		  mChannel = ChannelPtr
+		  mOpen = (ChannelPtr <> Nil)
 		  ChannelParent(Session).RegisterChannel(Me)
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Attributes( deprecated = "SSH.SCPStream.Constructor" )  Shared Function CreateSCP(Session As SSH.Session, Path As String, Mode As Integer, Length As UInt32, ModTime As Integer, AccessTime As Integer) As SSH.Channel
+		Attributes( deprecated = "SSH.SCPStream.Constructor" )  Shared Function CreateSCP(Session As SSH.Session, Path As String, Mode As Integer, Length As UInt64, ModTime As Integer, AccessTime As Integer) As SSH.Channel
 		  ' Creates a new channel over the session for uploading over SCP. Perform the upload by writing to the returned
 		  ' Channel object. Make sure to call Channel.Close() when finished.
 		  ' Session is an existing SSH session. Path is the full remote path to save the upload to.
@@ -43,7 +39,7 @@ Implements SSHStream
 		  
 		  Dim c As Ptr
 		  Do
-		    c = libssh2_scp_send_ex(Session.Handle, Path, Mode, Length, ModTime, AccessTime)
+		    c = libssh2_scp_send64(Session.Handle, Path, Mode, Length, ModTime, AccessTime)
 		    If c = Nil Then
 		      Dim e As Integer = Session.GetLastError
 		      If e = LIBSSH2_ERROR_EAGAIN Then Continue
@@ -112,6 +108,7 @@ Implements SSHStream
 	#tag Method, Flags = &h0
 		Sub EOF(Assigns b As Boolean)
 		  ' Informs the server that no further data will be sent over the channel.
+		  ' You may only assign True; assigning False does nothing.
 		  
 		  If Not b Then Return
 		  Do
@@ -123,7 +120,7 @@ Implements SSHStream
 
 	#tag Method, Flags = &h0
 		Function Execute(Command As String) As Boolean
-		  ' Execute a program on the server and attach its stdin, stdout, and stderr streams to this channel.
+		  ' Execute a command on the server and attach its stdin, stdout, and stderr streams to this channel.
 		  
 		  Return ProcessStart("exec", Command)
 		End Function
@@ -138,24 +135,15 @@ Implements SSHStream
 
 	#tag Method, Flags = &h0
 		Sub Flush(StreamID As Integer)
+		  ' Flush pending output to the stream specified by StreamID.
+		  ' StreamID may be an actual stream ID number or the one of LIBSSH2_CHANNEL_FLUSH_* constants.
+		  
 		  Do
 		    mLastError = libssh2_channel_flush_ex(mChannel, StreamID)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
 		  If mLastError <> 0 Then Raise New SSHException(Me)
 		  
 		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function Handle() As Ptr
-		  Return mChannel
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function LastError() As Int32
-		  Return mLastError
-		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -175,6 +163,7 @@ Implements SSHStream
 		  ' PacketSize is the maximum number of bytes remote host is allowed to send in a single packet.
 		  ' Message contains additional data as required by the selected channel Type.
 		  
+		  If Not Session.IsAuthenticated Then Raise New SSHException(ERR_NOT_AUTHENTICATED)
 		  Dim typ As MemoryBlock = Type + Chr(0)
 		  Dim msg As MemoryBlock = Message + Chr(0)
 		  Do
@@ -207,88 +196,73 @@ Implements SSHStream
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function Poll(Timeout As Integer = 1000) As Boolean
-		  ' ' Returns True if data is available in the channel's read buffer.
-		  ' 
-		  ' If mChannel <> Nil Then Return (libssh2_poll_channel_read(mChannel, 0) <> 0)
+		Function Poll(Timeout As Integer = 1000, EventMask As Integer = - 1) As Boolean
+		  ' Polls all streams and returns True if any of them signal readiness. A bitmask of
+		  ' LIBSSH2_POLLFD_* constants is stored in Channel.LastError indicating which stream(s)
+		  ' are ready.
 		  
-		  Return PollReadable(Timeout) Or PollReadable(Timeout, True) Or PollWriteable()
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h1
-		Protected Function PollEvents(Timeout As Integer, EventMask As Integer) As Integer
-		  If Not mOpen Then Return 0
+		  If Not mOpen Then Return False
+		  If EventMask = -1 Then EventMask = LIBSSH2_POLLFD_POLLIN Or LIBSSH2_POLLFD_POLLEXT Or LIBSSH2_POLLFD_POLLOUT
+		  
 		  Dim pollfd As LIBSSH2_POLLFD
 		  pollfd.Type = LIBSSH2_POLLFD_CHANNEL
 		  pollfd.Descriptor = Me.Handle
 		  pollfd.Events = EventMask
-		  If libssh2_poll(pollfd, 1, Timeout) <> 1 Then Return 0
-		  Return pollfd.REvents
+		  If libssh2_poll(pollfd, 1, Timeout) <> 1 Then
+		    mLastError = Session.LastError
+		    Return False
+		  End If
+		  mLastError = pollfd.REvents
+		  
+		  Dim canRead, canWrite, canReadErr, pollErr, hupErr, closedErr, invalErr, exErr As Boolean
+		  canRead = BitAnd(mLastError, LIBSSH2_POLLFD_POLLIN) = LIBSSH2_POLLFD_POLLIN
+		  canWrite = BitAnd(mLastError, LIBSSH2_POLLFD_POLLOUT) = LIBSSH2_POLLFD_POLLOUT
+		  canReadErr = BitAnd(mLastError, LIBSSH2_POLLFD_POLLEXT) = LIBSSH2_POLLFD_POLLEXT
+		  pollErr = BitAnd(mLastError, LIBSSH2_POLLFD_POLLERR) = LIBSSH2_POLLFD_POLLERR
+		  hupErr = BitAnd(mLastError, LIBSSH2_POLLFD_POLLHUP) = LIBSSH2_POLLFD_POLLHUP
+		  closedErr = BitAnd(mLastError, LIBSSH2_POLLFD_SESSION_CLOSED) = LIBSSH2_POLLFD_SESSION_CLOSED Or BitAnd(mLastError, LIBSSH2_POLLFD_CHANNEL_CLOSED) = LIBSSH2_POLLFD_CHANNEL_CLOSED
+		  invalErr = BitAnd(mLastError, LIBSSH2_POLLFD_POLLNVAL) = LIBSSH2_POLLFD_POLLNVAL
+		  exErr = BitAnd(mLastError, LIBSSH2_POLLFD_POLLEX) = LIBSSH2_POLLFD_POLLEX
+		  
+		  If canRead Then RaiseEvent DataAvailable(False)
+		  If canReadErr Then RaiseEvent DataAvailable(True)
+		  If pollErr Or hupErr Or invalErr Or exErr Then
+		    RaiseEvent Error(mLastError)
+		    mOpen = False
+		  ElseIf closedErr Then
+		    mLastError = Session.LastError()
+		    RaiseEvent Disconnected()
+		    mOpen = False
+		  End If
+		  Return canRead Or canWrite Or canReadErr
+		  
 		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
 		Function PollReadable(Timeout As Integer = 1000, PollStdErr As Boolean = False) As Boolean
+		  ' Polls the Channel for readability. Returns True if you may Read() from the
+		  ' Channel without blocking. Check Channel.BytesAvailable to learn how much
+		  ' may be read.
+		  
 		  If Not mOpen Then Return False
 		  If Not PollStdErr Then
-		    mLastError = LIBSSH2_POLLFD_POLLIN
+		    Return Poll(Timeout, LIBSSH2_POLLFD_POLLIN)
 		  Else
-		    mLastError = LIBSSH2_POLLFD_POLLEXT
+		    Return Poll(Timeout, LIBSSH2_POLLFD_POLLEXT)
 		  End If
-		  mLastError = PollEvents(Timeout, mLastError)
-		  If mLastError = 0 Then Return False
-		  Select Case True
-		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLIN) = LIBSSH2_POLLFD_POLLIN, BitAnd(mLastError, LIBSSH2_POLLFD_POLLEXT) = LIBSSH2_POLLFD_POLLEXT
-		    mLastError = 0
-		    RaiseEvent DataAvailable(PollStdErr)
-		    Return True
-		    
-		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLERR) = LIBSSH2_POLLFD_POLLERR, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLHUP) = LIBSSH2_POLLFD_POLLHUP, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_SESSION_CLOSED) = LIBSSH2_POLLFD_SESSION_CLOSED, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLNVAL) = LIBSSH2_POLLFD_POLLNVAL, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLEX) = LIBSSH2_POLLFD_POLLEX
-		    RaiseEvent Error(mLastError)
-		    mOpen = False
-		    
-		  Case BitAnd(mLastError, LIBSSH2_POLLFD_CHANNEL_CLOSED) = LIBSSH2_POLLFD_CHANNEL_CLOSED, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_LISTENER_CLOSED) = LIBSSH2_POLLFD_LISTENER_CLOSED
-		    ' disconnected but there may be data available in the buffer still
-		    mLastError = Session.LastError()
-		    RaiseEvent Disconnected()
-		    mOpen = False
-		  End Select
 		  
 		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
 		Function PollWriteable(Timeout As Integer = 1000) As Boolean
-		  System.DebugLog(CurrentMethodName + "(" + Str(Timeout) + ")")
+		  ' Polls the Channel for writeability. Returns True if you may Write() to the
+		  ' Channel without blocking. Check Channel.BytesLeft to learn how much
+		  ' may be written.
+		  
 		  If Not mOpen Then Return False
-		  mLastError = LIBSSH2_POLLFD_POLLOUT
-		  mLastError = PollEvents(Timeout, mLastError)
-		  
-		  Select Case True
-		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLOUT) = LIBSSH2_POLLFD_POLLOUT
-		    mLastError = 0
-		    Return True
-		  Case BitAnd(mLastError, LIBSSH2_POLLFD_POLLERR) = LIBSSH2_POLLFD_POLLERR, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLHUP) = LIBSSH2_POLLFD_POLLHUP, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_SESSION_CLOSED) = LIBSSH2_POLLFD_SESSION_CLOSED, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLNVAL) = LIBSSH2_POLLFD_POLLNVAL, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_POLLEX) = LIBSSH2_POLLFD_POLLEX
-		    RaiseEvent Error(mLastError)
-		    mOpen = False
-		    
-		  Case BitAnd(mLastError, LIBSSH2_POLLFD_CHANNEL_CLOSED) = LIBSSH2_POLLFD_CHANNEL_CLOSED, _
-		    BitAnd(mLastError, LIBSSH2_POLLFD_LISTENER_CLOSED) = LIBSSH2_POLLFD_LISTENER_CLOSED
-		    mLastError = Session.LastError()
-		    RaiseEvent Disconnected()
-		    mOpen = False
-		  End Select
-		  
+		  Return Poll(Timeout, LIBSSH2_POLLFD_POLLOUT)
 		End Function
 	#tag EndMethod
 
@@ -422,6 +396,7 @@ Implements SSHStream
 		  
 		  Dim buffer As MemoryBlock = text
 		  Dim size As Integer = buffer.Size
+		  If size = 0 Then Return
 		  Do
 		    mLastError = libssh2_channel_write_ex(mChannel, StreamID, buffer, size)
 		    Select Case mLastError
@@ -470,6 +445,24 @@ Implements SSHStream
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  Return BytesReadable
+			End Get
+		#tag EndGetter
+		Attributes( deprecated = "SSH.Channel.BytesReadable" ) BytesAvailable As UInt32
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  Return BytesWriteable
+			End Get
+		#tag EndGetter
+		Attributes( deprecated = "SSH.Channel.BytesWriteable" ) BytesLeft As UInt32
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
 			  ' Returns the number of bytes actually available to be read.
 			  
 			  Dim avail, initial As UInt32
@@ -477,19 +470,19 @@ Implements SSHStream
 			  Return avail
 			End Get
 		#tag EndGetter
-		BytesAvailable As UInt32
+		BytesReadable As UInt32
 	#tag EndComputedProperty
 
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
-			  ' Returns the number of bytes which the remote end may send without overflowing the window.
+			  ' Returns the number of bytes which can be written to the channel without blocking.
 			  
-			  Dim avail, initial As UInt32
-			  If mChannel <> Nil Then Return libssh2_channel_window_read_ex(mChannel, avail,  initial)
+			  Dim initial As UInt32
+			  If mChannel <> Nil Then Return libssh2_channel_window_write_ex(mChannel,  initial)
 			End Get
 		#tag EndGetter
-		BytesLeft As UInt32
+		BytesWriteable As UInt32
 	#tag EndComputedProperty
 
 	#tag ComputedProperty, Flags = &h0
@@ -509,7 +502,7 @@ Implements SSHStream
 			  If mLastError < 0 Then Raise New SSHException(Me)
 			End Set
 		#tag EndSetter
-		DataMode As SSH.Channel.ExtendedDataMode
+		DataMode As SSH.ExtendedDataMode
 	#tag EndComputedProperty
 
 	#tag ComputedProperty, Flags = &h0
@@ -529,10 +522,30 @@ Implements SSHStream
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  Return mChannel
+			End Get
+		#tag EndGetter
+		Handle As Ptr
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
 			  return mOpen
 			End Get
 		#tag EndGetter
 		IsOpen As Boolean
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' Returns the most recent libssh2 error code for this instance of Channel
+			  
+			  Return mLastError
+			End Get
+		#tag EndGetter
+		LastError As Int32
 	#tag EndComputedProperty
 
 	#tag Property, Flags = &h21
@@ -540,15 +553,11 @@ Implements SSHStream
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mDataMode As ExtendedDataMode
+		Private mDataMode As SSH.ExtendedDataMode
 	#tag EndProperty
 
 	#tag Property, Flags = &h1
 		Protected mFreeable As Boolean = True
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mInit As SSHInit
 	#tag EndProperty
 
 	#tag Property, Flags = &h1
@@ -579,6 +588,18 @@ Implements SSHStream
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  ' Returns the number of bytes which the remote end may send without overflowing the window.
+			  
+			  Dim avail, initial As UInt32
+			  If mChannel <> Nil Then Return libssh2_channel_window_read_ex(mChannel, avail,  initial)
+			End Get
+		#tag EndGetter
+		RemoteBytesWriteable As UInt32
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
 			  return mSession
 			End Get
 		#tag EndGetter
@@ -591,19 +612,12 @@ Implements SSHStream
 			  ' Returns the window size as defined when the channel was created.
 			  
 			  Dim initial As UInt32
-			  If mChannel <> Nil Then Return libssh2_channel_window_write_ex(mChannel,  initial)
+			  If mChannel <> Nil Then Call libssh2_channel_window_write_ex(mChannel,  initial)
 			  Return initial
 			End Get
 		#tag EndGetter
 		WriteWindow As UInt32
 	#tag EndComputedProperty
-
-
-	#tag Enum, Name = ExtendedDataMode, Type = Integer, Flags = &h0
-		Normal
-		  Ignore
-		Merge
-	#tag EndEnum
 
 
 	#tag ViewBehavior

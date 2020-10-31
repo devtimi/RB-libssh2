@@ -34,7 +34,6 @@ Protected Class KnownHosts
 	#tag Method, Flags = &h0
 		Sub Constructor(Session As SSH.Session)
 		  mSession = Session
-		  mInit = SSHInit.GetInstance()
 		  mKnownHosts = libssh2_knownhost_init(mSession.Handle)
 		  If mKnownHosts = Nil Then
 		    mLastError = mSession.GetLastError()
@@ -141,12 +140,6 @@ Protected Class KnownHosts
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function Handle() As Ptr
-		  Return mKnownHosts
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
 		Function Key(Index As Integer) As MemoryBlock
 		  ' Returns the key of the fingerprint at Index
 		  
@@ -154,12 +147,6 @@ Protected Class KnownHosts
 		  Dim mb As MemoryBlock = struct.Key
 		  Return mb.CString(0)
 		  
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function LastError() As Int32
-		  Return mLastError
 		End Function
 	#tag EndMethod
 
@@ -264,9 +251,25 @@ Protected Class KnownHosts
 	#tag EndMethod
 
 
-	#tag Property, Flags = &h21
-		Private mInit As SSHInit
-	#tag EndProperty
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  Return mKnownHosts
+			End Get
+		#tag EndGetter
+		Handle As Ptr
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' Returns the most recent libssh2 error code for this instance of KnownHosts
+			  
+			  Return mLastError
+			End Get
+		#tag EndGetter
+		LastError As Int32
+	#tag EndComputedProperty
 
 	#tag Property, Flags = &h21
 		Private mKnownHosts As Ptr

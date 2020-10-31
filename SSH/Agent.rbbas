@@ -2,15 +2,20 @@
 Protected Class Agent
 	#tag Method, Flags = &h0
 		Function Authenticate(Username As String, KeyIndex As Integer) As Boolean
-		  Dim identity As Ptr = GetIdentity(KeyIndex)
+		  ' Authenticate the current Session with the specified Username
+		  ' using the key at KeyIndex in the Agent's list of keys.
+		  
+		  Dim identity As Ptr = GetIdentityPtr(KeyIndex)
 		  mLastError = libssh2_agent_userauth(mAgent, Username, identity)
 		  Return mLastError = 0
 		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function Comment(Index As Integer) As String
-		  Dim struct As libssh2_agent_publickey = Me.GetIdentity(Index).libssh2_agent_publickey
+		Attributes( deprecated = "SSH.Agent.GetIdentity" )  Function Comment(Index As Integer) As String
+		  ' Returns the comment (if any) for the key at Index in the Agent's list of keys.
+		  
+		  Dim struct As libssh2_agent_publickey = Me.GetIdentityPtr(Index).libssh2_agent_publickey
 		  Dim mb As MemoryBlock = struct.Comment
 		  If mb <> Nil Then Return mb.CString(0)
 		End Function
@@ -18,6 +23,8 @@ Protected Class Agent
 
 	#tag Method, Flags = &h0
 		Function Connect() As Boolean
+		  ' Connect to the local key management service.
+		  
 		  Do
 		    mLastError = libssh2_agent_connect(mAgent)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
@@ -29,8 +36,10 @@ Protected Class Agent
 
 	#tag Method, Flags = &h0
 		Sub Constructor(Session As SSH.Session)
+		  ' Creates a new instance of Agent which can be used for authenticating
+		  ' the specified Session.
+		  
 		  mSession = Session
-		  mInit = SSHInit.GetInstance()
 		  mAgent = libssh2_agent_init(Session.Handle)
 		  If mAgent = Nil Then
 		    mLastError = ERR_INIT_FAILED
@@ -41,6 +50,9 @@ Protected Class Agent
 
 	#tag Method, Flags = &h0
 		Function Count() As Integer
+		  ' Returns the number of keys in the Agent's list. The index of the last key is Count-1.
+		  ' Be sure to call Connect() and then Refresh() before asking for the Count.
+		  
 		  Dim c As Integer
 		  Dim prev As Ptr
 		  Do
@@ -65,6 +77,9 @@ Protected Class Agent
 
 	#tag Method, Flags = &h0
 		Sub Disconnect()
+		  ' Disconnect from the local key management service. Called automatically by
+		  ' the Destructor method.
+		  
 		  If mAgent = Nil Or Not mConnected Then Return
 		  Do
 		    mLastError = libssh2_agent_disconnect(mAgent)
@@ -74,8 +89,17 @@ Protected Class Agent
 		End Sub
 	#tag EndMethod
 
+	#tag Method, Flags = &h0
+		Function GetIdentity(Index As Integer) As SSH.AgentKey
+		  Dim struct As Ptr = GetIdentityPtr(Index)
+		  If struct <> Nil Then Return New AgentKeyPtr(Me, struct, Index)
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h1
-		Protected Function GetIdentity(Index As Integer) As Ptr
+		Protected Function GetIdentityPtr(Index As Integer) As Ptr
+		  ' Returns a Ptr to the libssh2_agent_publickey structure at Index.
+		  
 		  Dim prev As Ptr
 		  Dim c As Integer
 		  Do
@@ -92,20 +116,10 @@ Protected Class Agent
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function Handle() As Ptr
-		  Return mAgent
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function LastError() As Int32
-		  Return mLastError
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function PublicKey(Index As Integer) As MemoryBlock
-		  Dim struct As libssh2_agent_publickey = Me.GetIdentity(Index).libssh2_agent_publickey
+		Attributes( deprecated = "SSH.Agent.GetIdentity" )  Function PublicKey(Index As Integer) As MemoryBlock
+		  ' Returns a copy of the PublicKey at Index in the Agent's list of keys.
+		  
+		  Dim struct As libssh2_agent_publickey = Me.GetIdentityPtr(Index).libssh2_agent_publickey
 		  Dim mb As MemoryBlock = struct.Blob
 		  Return mb.StringValue(0, struct.BlobLength)
 		End Function
@@ -113,6 +127,8 @@ Protected Class Agent
 
 	#tag Method, Flags = &h0
 		Function Refresh() As Boolean
+		  ' Requests the Agent's list of keys. Must be called after Connect().
+		  
 		  mLastError = libssh2_agent_list_identities(mAgent)
 		  Return mLastError = 0
 		End Function
@@ -122,10 +138,32 @@ Protected Class Agent
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  Return mAgent
+			End Get
+		#tag EndGetter
+		Handle As Ptr
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' Returns True if we're connected to the local Agent service.
+			  
 			  return mConnected
 			End Get
 		#tag EndGetter
 		IsConnected As Boolean
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' Returns the most recent libssh2 error code for this instance
+			  
+			  Return mLastError
+			End Get
+		#tag EndGetter
+		LastError As Int32
 	#tag EndComputedProperty
 
 	#tag Property, Flags = &h21
@@ -137,16 +175,26 @@ Protected Class Agent
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mInit As SSHInit
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
 		Private mLastError As Int32
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
 		Private mSession As SSH.Session
 	#tag EndProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  If mAgent <> Nil Then Return libssh2_agent_get_identity_path(mAgent)
+			End Get
+		#tag EndGetter
+		#tag Setter
+			Set
+			  If mAgent <> Nil And value <> "" Then libssh2_agent_set_identity_path(mAgent, value)
+			End Set
+		#tag EndSetter
+		Path As String
+	#tag EndComputedProperty
 
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter

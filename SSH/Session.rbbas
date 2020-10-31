@@ -115,15 +115,7 @@ Implements ChannelParent
 		  Me.SetCallback(CB_Ignore, AddressOf IgnoreHandler)
 		  Me.SetCallback(CB_MACError, AddressOf MACErrorHandler)
 		  Me.SetCallback(CB_X11Open, AddressOf X11OpenHandler)
-		  
-		  #If TargetWin32
-		    Const zlib1 = "zlib1.dll"
-		  #ElseIf TargetMacOS
-		    Const zlib1 = "/usr/lib/libz.dylib"
-		  #Else
-		    Const zlib1 = "libz.so.1"
-		  #endif
-		  If System.IsFunctionAvailable("zlibVersion", zlib1) Then Me.UseCompression = True
+		  If IsCompressionAvailable Then Me.UseCompression = True
 		End Sub
 	#tag EndMethod
 
@@ -173,6 +165,17 @@ Implements ChannelParent
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Function GetActualAlgorithm(Type As SSH.AlgorithmType) As String
+		  ' Once connected to a server, this method returns the negotiated algorithm
+		  ' for the specified AlgorithmType.
+		  
+		  Dim item As CString = libssh2_session_methods(mSession, Type)
+		  Return item
+		  
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Function GetAuthenticationMethods(Username As String) As String()
 		  Dim mb As MemoryBlock = Username
 		  Dim lst As Ptr = libssh2_userauth_list(mSession, mb, mb.Size)
@@ -184,8 +187,37 @@ Implements ChannelParent
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Function GetAvailableAlgorithms(Type As SSH.AlgorithmType) As String()
+		  ' Returns an array of available algorithms for the specified AlgorithmType.
+		  
+		  Dim ret() As String
+		  If mSession = Nil Then Return ret
+		  
+		  Dim lst As Ptr
+		  mLastError = libssh2_session_supported_algs(mSession, Type, lst)
+		  If mLastError >= 0 Then ' err is the number of algs
+		    Try
+		      Dim item As MemoryBlock = lst.Ptr(0)
+		      For i As Integer = 0 To mLastError
+		        ret.Append(item.CString(0))
+		        #If Target32Bit Then
+		          item = lst.Ptr(i * 4)
+		        #Else
+		          item = lst.Ptr(i * 8)
+		        #EndIf
+		      Next
+		    Finally
+		      libssh2_free(mSession, lst)
+		    End Try
+		  End If
+		  
+		  Return ret
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Function GetLastError() As Int32
-		  ' Returns the most recent error code known to libshh2
+		  ' Queries the most recent error code known to libshh2.
 		  
 		  If mSession = Nil Then Return 0
 		  Return libssh2_session_last_errno(mSession)
@@ -196,12 +228,6 @@ Implements ChannelParent
 		Function GetRemoteBanner() As String
 		  Dim mb As MemoryBlock = libssh2_session_banner_get(mSession)
 		  If mb <> Nil Then Return mb.CString(0)
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function Handle() As Ptr
-		  Return mSession
 		End Function
 	#tag EndMethod
 
@@ -255,29 +281,6 @@ Implements ChannelParent
 		  If w = Nil Or w.Value = Nil Then Return
 		  SSH.Session(w.Value).Sess_KeyboardAuth(Name, NameLength, Instruction, InstructionLength, PromptCount, Prompts, Responses)
 		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function LastError() As Int32
-		  ' Returns the most recent error code returned from a libssh2 function call. If the last
-		  ' recorded error is zero then calls GetLastError()
-		  
-		  If mLastError <> 0 Then Return mLastError Else Return GetLastError()
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function LastErrorMsg() As String
-		  ' Returns a human readable error message for the most recent error.
-		  
-		  If mSession = Nil Then Return ""
-		  Dim mb As New MemoryBlock(1024)
-		  Dim sz As Integer
-		  Call libssh2_session_last_error(mSession, mb, sz, mb.Size)
-		  If mb.Ptr(0) <> Nil Then mb = mb.Ptr(0)
-		  Return mb.StringValue(0, sz)
-		  
-		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -371,7 +374,10 @@ Implements ChannelParent
 		  Do
 		    mLastError = libssh2_userauth_keyboard_interactive_ex(mSession, Username, Username.Len, AddressOf KeyboardAuthHandler)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  Return mLastError = 0
+		  If mLastError = 0 Then
+		    mUsername = Username
+		    Return True
+		  End If
 		End Function
 	#tag EndMethod
 
@@ -388,7 +394,10 @@ Implements ChannelParent
 		      mLastError = libssh2_userauth_publickey_fromfile_ex(mSession, Username, Username.Len, Nil, PrivateKey.AbsolutePath_, PrivateKeyPassword)
 		    End If
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  Return mLastError = 0
+		  If mLastError = 0 Then
+		    mUsername = Username
+		    Return True
+		  End If
 		End Function
 	#tag EndMethod
 
@@ -405,7 +414,10 @@ Implements ChannelParent
 		      mLastError = libssh2_userauth_publickey_frommemory(mSession, Username, Username.Len, Nil, 0, PrivateKey, PrivateKey.Size, PrivateKeyPassword)
 		    End If
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  Return mLastError = 0
+		  If mLastError = 0 Then
+		    mUsername = Username
+		    Return True
+		  End If
 		End Function
 	#tag EndMethod
 
@@ -431,6 +443,8 @@ Implements ChannelParent
 		  Finally
 		    If cleanup Then Agent.Disconnect()
 		  End Try
+		  
+		  If ok Then mUsername = Username
 		  Return ok
 		End Function
 	#tag EndMethod
@@ -442,7 +456,10 @@ Implements ChannelParent
 		  Do
 		    mLastError = libssh2_userauth_password_ex(mSession, Username, Username.Len, Password, Password.Len, AddressOf PasswordChangeReqCallback)
 		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-		  Return mLastError = 0
+		  If mLastError = 0 Then
+		    mUsername = Username
+		    Return True
+		  End If
 		End Function
 	#tag EndMethod
 
@@ -563,6 +580,20 @@ Implements ChannelParent
 		End Sub
 	#tag EndMethod
 
+	#tag Method, Flags = &h0
+		Sub SetPreferredAlgorithms(Type As SSH.AlgorithmType, Preferred() As String)
+		  ' Prior to calling Session.Connect(), you may use this method to specify a list of
+		  ' acceptable algorithms for the specified AlgorithmType.
+		  
+		  If IsConnected Then
+		    mLastError = ERR_TOO_LATE
+		    Return
+		  End If
+		  Dim lst As MemoryBlock = Join(Preferred, ",") + Chr(0)
+		  mLastError = libssh2_session_method_pref(mSession, Type, lst)
+		End Sub
+	#tag EndMethod
+
 	#tag Method, Flags = &h21
 		Private Sub UnregisterChannel(Chan As Channel)
 		  If mChannels = Nil Then Return
@@ -647,6 +678,15 @@ Implements ChannelParent
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  Return mSession
+			End Get
+		#tag EndGetter
+		Handle As Ptr
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
 			  If mSession = Nil Then Return Nil
 			  Dim sz, typ As Integer
 			  Dim mb As MemoryBlock = libssh2_session_hostkey(mSession, sz, typ)
@@ -705,6 +745,35 @@ Implements ChannelParent
 		KeepAlivePeriod As Integer
 	#tag EndComputedProperty
 
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' Returns the most recent error code returned from a libssh2 function call. If the last
+			  ' recorded error is zero then calls GetLastError()
+			  
+			  If mLastError <> 0 Then Return mLastError Else Return GetLastError()
+			End Get
+		#tag EndGetter
+		LastError As Int32
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' Returns a human readable error message for the most recent error.
+			  
+			  If mSession = Nil Then Return ""
+			  Dim mb As New MemoryBlock(1024)
+			  Dim sz As Integer
+			  Call libssh2_session_last_error(mSession, mb, sz, mb.Size)
+			  If mb.Ptr(0) <> Nil Then mb = mb.Ptr(0)
+			  Return mb.StringValue(0, sz)
+			  
+			End Get
+		#tag EndGetter
+		LastErrorMsg As String
+	#tag EndComputedProperty
+
 	#tag Property, Flags = &h21
 		Private mAbstract As Integer
 	#tag EndProperty
@@ -739,6 +808,10 @@ Implements ChannelParent
 
 	#tag Property, Flags = &h21
 		Private mUseCompression As Boolean
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mUsername As String
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -800,6 +873,15 @@ Implements ChannelParent
 			End Set
 		#tag EndSetter
 		UseCompression As Boolean
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  return mUsername
+			End Get
+		#tag EndGetter
+		Username As String
 	#tag EndComputedProperty
 
 	#tag ComputedProperty, Flags = &h0

@@ -17,22 +17,29 @@ Implements SSHStream
 		Protected Sub Constructor(Session As SSH.SFTPSession, RemoteName As String, Flags As Integer, Mode As Integer, Directory As Boolean = False)
 		  mSession = Session
 		  mDirectory = Directory
+		  mFilename = RemoteName
 		  
 		  If Not mSession.Session.IsAuthenticated Then
 		    mLastError = ERR_NOT_AUTHENTICATED
 		    Raise New SSHException(Me)
 		  End If
 		  
-		  mInit = SSHInit.GetInstance()
 		  Dim fn As MemoryBlock = RemoteName
 		  If Not Directory Then
 		    mStream = libssh2_sftp_open_ex(mSession.Handle, fn, fn.Size, Flags, Mode, LIBSSH2_SFTP_OPENFILE)
 		  Else
 		    mStream = libssh2_sftp_open_ex(mSession.Handle, fn, fn.Size, Flags, Mode, LIBSSH2_SFTP_OPENDIR)
 		  End If
-		  If mStream = Nil Then Raise New SSHException(mSession)
+		  If mStream = Nil Then 
+		    mLastError = mSession.Session.LastError ' -31
+		    Raise New SSHException(Me)
+		  End If
 		  
-		  
+		  mAppendOnly = (BitAnd(Flags, LIBSSH2_FXF_APPEND) = LIBSSH2_FXF_APPEND)
+		  mIsWriteable = (BitAnd(Flags, LIBSSH2_FXF_WRITE) = LIBSSH2_FXF_WRITE)
+		  If mAppendOnly Then mIsWriteable = True
+		  mIsReadable = (BitAnd(Flags, LIBSSH2_FXF_READ) = LIBSSH2_FXF_READ)
+		  Call ReadAttributes()
 		End Sub
 	#tag EndMethod
 
@@ -72,52 +79,9 @@ Implements SSHStream
 		End Sub
 	#tag EndMethod
 
-	#tag Method, Flags = &h0
-		Function Handle() As Ptr
-		  Return mStream
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function LastError() As Int32
-		  ' This is an error code returned from the libssh2 API. If the last error was
-		  ' LIBSSH2_ERROR_SFTP_PROTOCOL(-31) then refer to the LastStatusCode property
-		  ' of the SFTPSession that owns this stream for the SFTP status code (which will
-		  ' be one of the LIBSSH2_FX_* constants.)
-		  
-		  Return mLastError
-		End Function
-	#tag EndMethod
-
 	#tag Method, Flags = &h21
-		Private Shared Function PermissionsToMode(p As Permissions) As UInt32
-		  Const TGEXEC = &o00010
-		  Const TGREAD = &o00040
-		  Const TGWRITE = &o00020
-		  Const TOEXEC = &o00001
-		  Const TOREAD = &o00004
-		  Const TOWRITE = &o00002
-		  Const TSGID = &o02000
-		  Const TSUID = &o04000
-		  Const TSVTX = &o01000
-		  Const TUEXEC = &o00100
-		  Const TUREAD = &o00400
-		  Const TUWRITE = &o00200
-		  
-		  Dim mask As UInt32
-		  If p.GroupExecute Then mask = mask Or TGEXEC
-		  If p.GroupRead Then mask = mask Or TGREAD
-		  If p.GroupWrite Then mask = mask Or TGWRITE
-		  
-		  If p.OwnerExecute Then mask = mask Or TUEXEC
-		  If p.OwnerRead Then mask = mask Or TUREAD
-		  If p.OwnerWrite Then mask = mask Or TUWRITE
-		  
-		  If p.OthersExecute Then mask = mask Or TOEXEC
-		  If p.OthersRead Then mask = mask Or TOREAD
-		  If p.OthersWrite Then mask = mask Or TOWRITE
-		  
-		  Return mask
+		Private Function HasAttribute(AttributeID As Int32) As Boolean
+		  Return BitAnd(mAttribs.Flags, AttributeID) = AttributeID
 		End Function
 	#tag EndMethod
 
@@ -144,6 +108,15 @@ Implements SSHStream
 		    Raise New SSHException(Me)
 		  End If
 		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub ReadAttributes()
+		  If mStream = Nil Then Return
+		  Do
+		    mLastError = libssh2_sftp_fstat_ex(mStream, mAttribs, 0)
+		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h1
@@ -181,6 +154,7 @@ Implements SSHStream
 		  ' Waits for the sent data to be ack'd before sending the rest
 		  
 		  If mDirectory Then Raise New IOException
+		  If text.LenB = 0 Then Return
 		  Dim buffer As MemoryBlock = text
 		  Dim size As Integer = buffer.Size
 		  Do
@@ -207,6 +181,22 @@ Implements SSHStream
 		End Sub
 	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Sub WriteAttributes()
+		  If mStream = Nil Then Return
+		  If Not IsWriteable Then
+		    ReadAttributes() ' reset values
+		    mLastError = LIBSSH2_FX_PERMISSION_DENIED
+		    Return
+		  End If
+		  
+		  Do
+		    mLastError = libssh2_sftp_fstat_ex(mStream, mAttribs, 1)
+		  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+		  
+		End Sub
+	#tag EndMethod
+
 	#tag Method, Flags = &h0
 		Function WriteError() As Boolean
 		  // Part of the Writeable interface.
@@ -219,37 +209,16 @@ Implements SSHStream
 		#tag Getter
 			Get
 			  If mStream = Nil Then Return Nil
-			  Dim attribs As LIBSSH2_SFTP_ATTRIBUTES
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 0)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_ACMODTIME) = LIBSSH2_SFTP_ATTR_ACMODTIME Then 
-			    Dim d As New Date(1970, 1, 1, 0, 0, 0, 0.0) 'UNIX epoch
-			    d.TotalSeconds = d.TotalSeconds + attribs.ATime
-			    Return d
-			  End If
+			  If HasAttribute(LIBSSH2_SFTP_ATTR_ACMODTIME) Then Return time_t(mAttribs.ATime)
 			End Get
 		#tag EndGetter
 		#tag Setter
 			Set
 			  If mStream = Nil Then Return
-			  Dim attribs As LIBSSH2_SFTP_ATTRIBUTES
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 0)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE) <> LIBSSH2_SFTP_ATTR_SIZE Then Return ' atime not settable
-			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_ACMODTIME) = LIBSSH2_SFTP_ATTR_ACMODTIME Then
-			    Dim d As New Date(1970, 1, 1, 0, 0, 0, 0.0) 'UNIX epoch
-			    attribs.ATime = value.TotalSeconds - d.TotalSeconds
-			  End If
-			  
-			  
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 1)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+			  Call ReadAttributes() ' refresh
+			  If Not HasAttribute(LIBSSH2_SFTP_ATTR_ACMODTIME) Then Return ' atime not settable
+			  mAttribs.ATime = time_t(value)
+			  Call WriteAttributes()
 			End Set
 		#tag EndSetter
 		AccessTime As Date
@@ -258,35 +227,97 @@ Implements SSHStream
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
-			  If mStream = Nil Then Return 0
-			  Dim attribs As LIBSSH2_SFTP_ATTRIBUTES
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 0)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE) = LIBSSH2_SFTP_ATTR_SIZE Then 
-			    Return attribs.FileSize
+			  return mDirectory
+			End Get
+		#tag EndGetter
+		Directory As Boolean
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  Return mFilename
+			End Get
+		#tag EndGetter
+		#tag Setter
+			Set
+			  mSession.Rename(Me.FullPath, value)
+			  If mSession.LastStatusCode = 0 Then
+			    mFilename = value
 			  End If
+			  
+			End Set
+		#tag EndSetter
+		FullPath As String
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  Return mStream
+			End Get
+		#tag EndGetter
+		Handle As Ptr
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  return mIsReadable
+			End Get
+		#tag EndGetter
+		IsReadable As Boolean
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  return mIsWriteable
+			End Get
+		#tag EndGetter
+		IsWriteable As Boolean
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  ' This is an error code returned from the libssh2 API. If the last error was
+			  ' LIBSSH2_ERROR_SFTP_PROTOCOL(-31) then refer to the LastStatusCode property
+			  ' of the SFTPSession that owns this stream for the SFTP status code (which will
+			  ' be one of the LIBSSH2_FX_* constants.)
+			  
+			  Return mLastError
+			End Get
+		#tag EndGetter
+		LastError As Int32
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  If mStream = Nil Then Return 0
+			  If HasAttribute(LIBSSH2_SFTP_ATTR_SIZE) Then Return mAttribs.FileSize
 			End Get
 		#tag EndGetter
 		#tag Setter
 			Set
 			  If mStream = Nil Then Return
-			  Dim attribs As LIBSSH2_SFTP_ATTRIBUTES
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 0)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE) <> LIBSSH2_SFTP_ATTR_SIZE Then Return ' size not settable
-			  attribs.FileSize = value
-			  
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 1)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+			  Call ReadAttributes() ' refresh
+			  If Not HasAttribute(LIBSSH2_SFTP_ATTR_SIZE) Then Return ' size not settable
+			  mAttribs.FileSize = value
+			  Call WriteAttributes()
 			End Set
 		#tag EndSetter
 		Length As UInt64
 	#tag EndComputedProperty
+
+	#tag Property, Flags = &h21
+		Private mAppendOnly As Boolean
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mAttribs As LIBSSH2_SFTP_ATTRIBUTES
+	#tag EndProperty
 
 	#tag Property, Flags = &h21
 		Private mDirectory As Boolean
@@ -297,7 +328,15 @@ Implements SSHStream
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mInit As SSHInit
+		Private mFilename As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mIsReadable As Boolean
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mIsWriteable As Boolean
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -308,30 +347,17 @@ Implements SSHStream
 		#tag Getter
 			Get
 			  If mStream = Nil Then Return Nil
-			  Dim attribs As LIBSSH2_SFTP_ATTRIBUTES
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 0)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+			  If HasAttribute(LIBSSH2_SFTP_ATTR_PERMISSIONS) Then Return New Permissions(mAttribs.Perms)
 			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_PERMISSIONS) = LIBSSH2_SFTP_ATTR_PERMISSIONS Then 
-			    Return New Permissions(attribs.Perms)
-			  End If
 			End Get
 		#tag EndGetter
 		#tag Setter
 			Set
 			  If mStream = Nil Then Return
-			  Dim attribs As LIBSSH2_SFTP_ATTRIBUTES
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 0)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
-			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_PERMISSIONS) <> LIBSSH2_SFTP_ATTR_PERMISSIONS Then Return ' perms not settable
-			  attribs.Perms = PermissionsToMode(value)
-			  
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 1)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+			  Call ReadAttributes() ' refresh
+			  If Not HasAttribute(LIBSSH2_SFTP_ATTR_PERMISSIONS) Then Return ' perms not settable
+			  mAttribs.Perms = PermissionsToMode(value)
+			  Call WriteAttributes()
 			End Set
 		#tag EndSetter
 		Mode As Permissions
@@ -341,16 +367,8 @@ Implements SSHStream
 		#tag Getter
 			Get
 			  If mStream = Nil Then Return Nil
-			  Dim attribs As LIBSSH2_SFTP_ATTRIBUTES
-			  Do
-			    mLastError = libssh2_sftp_fstat_ex(mStream, attribs, 0)
-			  Loop Until mLastError <> LIBSSH2_ERROR_EAGAIN
+			  If HasAttribute(LIBSSH2_SFTP_ATTR_ACMODTIME) Then Return time_t(mAttribs.MTime)
 			  
-			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_ACMODTIME) = LIBSSH2_SFTP_ATTR_ACMODTIME Then 
-			    Dim d As New Date(1970, 1, 1, 0, 0, 0, 0.0) 'UNIX epoch
-			    d.TotalSeconds = d.TotalSeconds + attribs.MTime
-			    Return d
-			  End If
 			End Get
 		#tag EndGetter
 		#tag Setter
@@ -364,8 +382,7 @@ Implements SSHStream
 			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE) <> LIBSSH2_SFTP_ATTR_SIZE Then Return ' atime not settable
 			  
 			  If BitAnd(attribs.Flags, LIBSSH2_SFTP_ATTR_ACMODTIME) = LIBSSH2_SFTP_ATTR_ACMODTIME Then
-			    Dim d As New Date(1970, 1, 1, 0, 0, 0, 0.0) 'UNIX epoch
-			    attribs.MTime = value.TotalSeconds - d.TotalSeconds
+			    attribs.MTime = time_t(value)
 			  End If
 			  
 			  
@@ -388,12 +405,65 @@ Implements SSHStream
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  If Right(FullPath, 1) = "/" Then
+			    return NthField(FullPath, "/", CountFields(FullPath, "/") - 1)
+			  Else
+			    return NthField(FullPath, "/", CountFields(FullPath, "/"))
+			  End If
+			End Get
+		#tag EndGetter
+		#tag Setter
+			Set
+			  Dim p As SFTPDirectory = Me.Parent()
+			  mSession.Rename(Me.FullPath, p.FullPath + value)
+			  If mSession.LastStatusCode = 0 Then
+			    mFilename = p.FullPath + value
+			  End If
+			  
+			End Set
+		#tag EndSetter
+		Name As String
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
+			  Dim nm() As String = Split(mFilename.Trim, "/")
+			  For i As Integer = UBound(nm) DownTo 0
+			    If nm(i).Trim = "" Then nm.Remove(i)
+			  Next
+			  If UBound(nm) = -1 Then
+			    mLastError = LIBSSH2_FX_INVALID_FILENAME
+			    Return Nil
+			  End If
+			  nm.Remove(nm.Ubound)
+			  Return mSession.ListDirectory("/" + Join(nm, "/") + "/")
+			End Get
+		#tag EndGetter
+		#tag Setter
+			Set
+			  Me.FullPath = value.FullPath + Me.Name
+			End Set
+		#tag EndSetter
+		Parent As SSH.SFTPDirectory
+	#tag EndComputedProperty
+
+	#tag ComputedProperty, Flags = &h0
+		#tag Getter
+			Get
 			  If mStream <> Nil Then Return libssh2_sftp_tell64(mStream)
 			End Get
 		#tag EndGetter
 		#tag Setter
 			Set
-			  If mStream <> Nil Then libssh2_sftp_seek64(mStream, value)
+			  If mStream <> Nil Then
+			    If value = Me.Position Then ReadAttributes() ' refresh
+			    If mAppendOnly Then
+			      mLastError = ERR_APPEND_ONLY
+			      Return
+			    End If
+			    libssh2_sftp_seek64(mStream, value)
+			  End If
 			End Set
 		#tag EndSetter
 		Position As UInt64
@@ -407,13 +477,6 @@ Implements SSHStream
 		#tag EndGetter
 		Session As SSH.SFTPSession
 	#tag EndComputedProperty
-
-
-	#tag Constant, Name = LIBSSH2_SFTP_OPENDIR, Type = Double, Dynamic = False, Default = \"1", Scope = Private
-	#tag EndConstant
-
-	#tag Constant, Name = LIBSSH2_SFTP_OPENFILE, Type = Double, Dynamic = False, Default = \"0", Scope = Private
-	#tag EndConstant
 
 
 	#tag ViewBehavior
